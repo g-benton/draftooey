@@ -1,6 +1,5 @@
-# Fantasy toolkit
-
-Personal, local-first command-line tools for a live Sleeper fantasy-football draft.
+# Draftooey
+A fantasy draft TUI to add agent support and a live terminal UI for a sleeper draft
 
 ## Setup
 
