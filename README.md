@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Fantasy toolkit
 
 Personal, local-first command-line tools for a live Sleeper fantasy-football draft.
@@ -110,3 +111,7 @@ uv run fantasy publish 'TURN 2 // PICKS 28 + 29' \
   --pair 'James Cook + Drake London' --lean 40 \
   --reason 'Balanced RB/WR volume.'
 ```
+=======
+# draftooey
+A TUI/chat integration for Sleeper based fantasy football.
+>>>>>>> e58de0a27e7caf041a570ca84a88aff47998ff63
