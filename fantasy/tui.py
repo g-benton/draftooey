@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import textwrap
 from typing import Any
 
 from rich.text import Text
@@ -14,7 +15,10 @@ from watchfiles import awatch
 from .assessment import build_assessment, proposal_player_details
 from .config import load_config
 from .sleeper import refresh
-from .store import advice_path, news_checks_path, read_json
+from .store import advice_path, outlooks_path, read_json
+
+
+BOARD_PLAYER_WIDTH = 22
 
 
 def meter(value: float, width: int = 10) -> str:
@@ -38,6 +42,7 @@ class DraftDeck(App[None]):
         Binding("t", "show_team", "Team", priority=True),
         Binding("c", "show_comms", "Comms", priority=True),
         Binding("n", "show_news", "News", priority=True),
+        Binding("enter", "toggle_summary", "Summary", priority=True),
         Binding("q", "quit", "Quit", priority=True),
     ]
 
@@ -50,6 +55,9 @@ class DraftDeck(App[None]):
         self._advice_mtime: int | None = None
         self.news_checks: list[dict[str, Any]] = []
         self._news_mtime: int | None = None
+        self.expanded_summaries: set[str] = set()
+        self._summary_subject_by_row: dict[str, str] = {}
+        self._player_by_row: dict[str, dict[str, Any]] = {}
 
     def compose(self) -> ComposeResult:
         yield Static("INITIALIZING DRAFT SIGNAL…", id="status")
@@ -90,6 +98,21 @@ class DraftDeck(App[None]):
         self.query_one("#turn-table", DataTable).add_columns("TURN", "PICK", "ROUND", "STATE", "PLAYER")
         self.query_one("#roster-table", DataTable).add_columns("POS", "PLAYER", "TEAM")
 
+    def configure_board_table(self, table: DataTable, *, player_title: str = "PLAYER") -> None:
+        table.clear(columns=True)
+        for label, width in (
+            ("LEAN", 7),
+            (player_title, BOARD_PLAYER_WIDTH),
+            ("POS", 3),
+            ("TEAM", 4),
+            ("ECR", 3),
+            ("ADP", 3),
+            ("FLK", 3),
+            ("TIER", 4),
+            ("BYE", 3),
+        ):
+            table.add_column(label, width=width)
+
     def render_assessment(self) -> None:
         try:
             data = build_assessment(position=self.position_filter, limit=5)
@@ -104,9 +127,14 @@ class DraftDeck(App[None]):
         )
 
         need_parts = []
+        progress = data.get("starter_progress") or {}
         for position in ("QB", "RB", "WR", "TE", "FLEX", "K", "DEF"):
-            gap = int(data["needs"].get(position, 0))
-            need_parts.append(f"{position} {meter(min(100, gap * 40), 6)} {gap}")
+            slot = progress.get(position)
+            if not slot:
+                continue
+            filled = int(slot.get("filled", 0))
+            target = max(1, int(slot.get("target", 1)))
+            need_parts.append(f"{position} {meter(filled / target * 100, 6)} {filled}/{target}")
         self.query_one("#needs-summary", Static).update("   ".join(need_parts))
 
         pair_plans = data.get("pair_plans") or []
@@ -122,19 +150,36 @@ class DraftDeck(App[None]):
             )
 
         candidates = self.query_one("#candidate-table", DataTable)
-        candidates.clear(columns=True)
-        candidates.add_columns("LEAN", "PLAYER", "FP ECR", "FP ADP", "FLOCK", "POS", "TEAM")
+        self.configure_board_table(candidates)
+        self._summary_subject_by_row.clear()
+        self._player_by_row.clear()
         for player in data["candidates"]:
+            player_name = player.get("name") or "Unknown"
+            row_key = str(player["player_id"])
+            self._player_by_row[row_key] = player
+            if self.news_summary(player_name):
+                self._summary_subject_by_row[row_key] = player_name
             candidates.add_row(
                 f"{player.get('share', 0)}%",
-                player.get("name") or "Unknown",
+                self.player_cell(player_name),
+                player.get("position") or "—",
+                player.get("team") or "—",
                 player.get("ecr") or "—",
                 player.get("adp") or "—",
                 player.get("flock_rank") or "—",
-                player.get("position") or "",
-                player.get("team") or "",
-                key=str(player["player_id"]),
+                player.get("tier") or player.get("flock_tier") or "—",
+                player.get("bye_week") or "—",
+                key=row_key,
             )
+            summary = self.board_news_summary(player_name)
+            if summary and self.news_expanded(player_name):
+                candidates.add_row(
+                    self.news_summary_label(player_name),
+                    Text(summary, style="italic"),
+                    "", "", "", "", "", "", "",
+                    height=summary.count("\n") + 1,
+                    key=f"news-{player['player_id']}",
+                )
 
         turns = self.query_one("#turn-table", DataTable)
         turns.clear()
@@ -157,9 +202,53 @@ class DraftDeck(App[None]):
                 player.get("position") or "", player.get("name") or "", player.get("team") or "", key=str(index)
             )
         if data["candidates"]:
-            self.show_player(str(data["candidates"][0]["player_id"]))
-        if self.latest_advice.get("proposals"):
+            self.show_player_details(data["candidates"][0])
+        if self.position_filter is None and self.latest_advice.get("proposals"):
             self.render_proposal_board(self.latest_advice)
+        elif self.position_filter is None and self.latest_advice.get("players"):
+            self.render_single_board(self.latest_advice)
+
+    def render_single_board(self, advice: dict[str, Any]) -> None:
+        names = advice.get("players") or []
+        if not names:
+            return
+        evidence = proposal_player_details(names)
+        table = self.query_one("#candidate-table", DataTable)
+        self.configure_board_table(table)
+        self._summary_subject_by_row.clear()
+        self._player_by_row.clear()
+        for index, name in enumerate(names):
+            player = evidence.get(name, {})
+            row_key = f"single-{index}"
+            self._player_by_row[row_key] = {**player, "name": player.get("name") or name}
+            if self.news_summary(name):
+                self._summary_subject_by_row[row_key] = name
+            table.add_row(
+                "CALL" if index == 0 else f"ALT {index}",
+                self.player_cell(name, bold=True),
+                player.get("position") or "—",
+                player.get("team") or "—",
+                player.get("ecr") or "—",
+                player.get("adp") or "—",
+                player.get("flock_rank") or "—",
+                player.get("tier") or player.get("flock_tier") or "—",
+                player.get("bye_week") or "—",
+                key=row_key,
+            )
+            summary = self.board_news_summary(name)
+            if summary and self.news_expanded(name):
+                table.add_row(
+                    self.news_summary_label(name),
+                    Text(summary, style="italic"),
+                    "", "", "", "", "", "", "",
+                    height=summary.count("\n") + 1,
+                    key=f"{row_key}-news",
+                )
+        self.query_one("#pair-plans", Static).update(
+            f"CODEX SINGLE BOARD  •  {advice.get('headline') or 'PICK PLAN'}  •  ENTER FOLDS NEWS"
+        )
+        if names:
+            self.show_player_details(self._player_by_row["single-0"])
 
     def render_proposal_board(self, advice: dict[str, Any]) -> None:
         proposals = advice.get("proposals") or []
@@ -168,16 +257,21 @@ class DraftDeck(App[None]):
         proposed_names = [name for proposal in proposals for name in (proposal.get("players") or [])]
         evidence = proposal_player_details(proposed_names)
         table = self.query_one("#candidate-table", DataTable)
-        table.clear(columns=True)
-        table.add_columns("LEAN", "PLAYER / WHY", "POS", "TEAM", "FP ECR", "FP ADP", "FLOCK", "TIER", "BYE")
+        self.configure_board_table(table, player_title="PLAYER / WHY")
+        self._summary_subject_by_row.clear()
+        self._player_by_row.clear()
         for index, proposal in enumerate(proposals):
             players = proposal.get("players") or []
             for player_index, name in enumerate(players[:2], start=1):
                 player = evidence.get(name, {})
                 label = f"{proposal.get('share', 0)}% P1" if player_index == 1 else "    P2"
+                row_key = f"proposal-{index}-p{player_index}"
+                self._player_by_row[row_key] = {**player, "name": player.get("name") or name}
+                if self.news_summary(name):
+                    self._summary_subject_by_row[row_key] = name
                 table.add_row(
                     label,
-                    Text(name, style="bold"),
+                    self.player_cell(name, bold=True),
                     player.get("position") or "—",
                     player.get("team") or "—",
                     player.get("ecr") or "—",
@@ -185,43 +279,58 @@ class DraftDeck(App[None]):
                     player.get("flock_rank") or "—",
                     player.get("tier") or player.get("flock_tier") or "—",
                     player.get("bye_week") or "—",
-                    key=f"proposal-{index}-p{player_index}",
+                    key=row_key,
                 )
+                summary = self.board_news_summary(name)
+                if summary and self.news_expanded(name):
+                    table.add_row(
+                        self.news_summary_label(name),
+                        Text(summary, style="italic"),
+                        "", "", "", "", "", "", "",
+                        height=summary.count("\n") + 1,
+                        key=f"proposal-{index}-p{player_index}-news",
+                    )
+            reason = self.wrap_board_text(proposal.get("reason") or "No rationale supplied.")
             table.add_row(
                 "WHY",
-                Text(proposal.get("reason") or "No rationale supplied.", style="italic"),
+                Text(reason, style="italic"),
                 "", "", "", "", "", "", "",
+                height=reason.count("\n") + 1,
                 key=f"proposal-{index}-why",
             )
         self.query_one("#pair-plans", Static).update(
             f"CODEX PAIR BOARD  •  {advice.get('headline') or 'TURN PLAN'}  •  SHARES TOTAL 100%"
         )
-        self.query_one("#player-detail", Static).update(advice.get("body") or "")
+        if self._player_by_row:
+            self.show_player_details(next(iter(self._player_by_row.values())))
 
-    def show_player(self, player_id: str) -> None:
-        player = next(
-            (row for row in self.assessment.get("candidates", []) if str(row["player_id"]) == player_id), None
-        )
-        if not player:
-            return
+    def show_player_details(self, player: dict[str, Any]) -> None:
         factors = player.get("factors", {})
-        detail = (
+        lines = [
             f"{player.get('name')}  •  FP ECR {player.get('ecr') or '—'}  •  FP ADP {player.get('adp') or '—'}  •  "
-            f"FLOCK {player.get('flock_rank') or '—'}  •  TIER {player.get('tier') or player.get('flock_tier') or '—'}  •  "
-            f"BYE {player.get('bye_week') or '—'}\n"
+            f"FLOCK {player.get('flock_rank') or '—'}  •  TIER {player.get('tier') or player.get('flock_tier') or '—'}  •  BYE {player.get('bye_week') or '—'}",
             f"AGE {player.get('age') or '—'}  •  EXP {player.get('years_exp') if player.get('years_exp') is not None else '—'}  •  "
             f"ECR RANGE {player.get('ecr_min') or '—'}–{player.get('ecr_max') or '—'} / AVG {player.get('ecr_average') or '—'}  •  "
-            f"INJURY {player.get('injury') or 'CLEAR'}\n"
-            f"RANK {meter(float(factors.get('ranking', 0)) * 100)}  "
-            f"FIT {meter(float(factors.get('roster_fit', 0)) * 100)}  "
-            f"VALUE {meter(float(factors.get('value', 0)) * 100)}  "
-            f"RISK {meter(float(factors.get('risk', 0)) * 100)}"
-        )
-        self.query_one("#player-detail", Static).update(detail)
+            f"INJURY {player.get('injury') or 'CLEAR'}",
+        ]
+        if factors:
+            lines.append(
+                f"RANK {meter(float(factors.get('ranking', 0)) * 100)}  "
+                f"FIT {meter(float(factors.get('roster_fit', 0)) * 100)}  "
+                f"VALUE {meter(float(factors.get('value', 0)) * 100)}  "
+                f"RISK {meter(float(factors.get('risk', 0)) * 100)}"
+            )
+        else:
+            signal = self.news_signal(str(player.get("name") or ""))
+            lines.append(f"OUTLOOK {signal}  •  ENTER TO EXPAND CACHED AGENT SUMMARY")
+        self.query_one("#player-detail", Static).update("\n".join(lines))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "candidate-table" and event.row_key is not None:
-            self.show_player(str(event.row_key.value))
+            key = str(event.row_key.value)
+            player = self._player_by_row.get(key)
+            if player:
+                self.show_player_details(player)
 
     def load_advice(self, *, announce: bool = False) -> None:
         path = advice_path()
@@ -243,7 +352,9 @@ class DraftDeck(App[None]):
         if player_line:
             banner.append(f"\n{player_line}", style="italic")
         self.query_one("#transmission", Static).update(banner)
-        self.render_proposal_board(data)
+        # Advice is canonical board state: a message with proposals renders the
+        # pair board, while one without proposals returns to the single board.
+        self.render_assessment()
         if announce:
             log = self.query_one("#comms-log", RichLog)
             log.write(Text(f"{data.get('published_at') or ''}  {headline}", style="bold"))
@@ -254,7 +365,7 @@ class DraftDeck(App[None]):
             log.write("")
 
     def load_news_checks(self) -> None:
-        path = news_checks_path()
+        path = outlooks_path()
         if not path.exists():
             self.query_one("#news-detail", Static).update(
                 "ASK CODEX FOR A RECENT NEWS CHECK — SEARCHES RUN ONLY ON REQUEST"
@@ -264,7 +375,11 @@ class DraftDeck(App[None]):
         if mtime == self._news_mtime:
             return
         self._news_mtime = mtime
-        self.news_checks = read_json(path).get("checks", [])
+        self.news_checks = sorted(
+            read_json(path).get("players", {}).values(),
+            key=lambda item: item.get("checked_at", ""),
+            reverse=True,
+        )
         selector = self.query_one("#news-select", Select)
         selector.set_options([
             (f"{item.get('subject')}  //  {str(item.get('verdict', '')).upper()}", str(index))
@@ -273,6 +388,76 @@ class DraftDeck(App[None]):
         if self.news_checks:
             selector.value = "0"
             self.render_news_check(0)
+        else:
+            selector.set_options([])
+            self.query_one("#news-detail", Static).update(
+                "NO CACHED OUTLOOKS — PLAYERS ARE SEARCHED ONLY WHEN DISCUSSED"
+            )
+        self.render_assessment()
+
+    def news_signal(self, subject: str) -> str:
+        item = self.news_item(subject)
+        if not item:
+            return "—"
+        verdicts = {
+            "positive": "POS",
+            "neutral": "NEU",
+            "negative": "NEG",
+            "mixed": "MIX",
+            "uncertain": "UNC",
+        }
+        confidence = str(item.get("confidence") or "low")[:1].upper()
+        return f"{verdicts.get(str(item.get('verdict')), 'UNC')}·{confidence}"
+
+    def news_key(self, subject: str) -> str:
+        item = self.news_item(subject) or {}
+        return str(item.get("player_id") or subject.casefold())
+
+    def news_expanded(self, subject: str) -> bool:
+        return self.news_key(subject) in self.expanded_summaries
+
+    def player_cell(self, subject: str, *, bold: bool = False) -> Text:
+        marker = ""
+        if self.news_summary(subject):
+            marker = "▾ " if self.news_expanded(subject) else "▸ "
+        return Text(f"{marker}{subject}", style="bold" if bold else None)
+
+    def wrap_board_text(self, value: str, *, max_lines: int = 10) -> str:
+        lines = textwrap.wrap(str(value).strip(), width=BOARD_PLAYER_WIDTH)
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            lines[-1] = lines[-1].rstrip(" .") + "…"
+        return "\n".join(lines)
+
+    def board_news_summary(self, subject: str) -> str:
+        item = self.news_item(subject)
+        if not item:
+            return ""
+        summary = str(item.get("summary") or "").strip()
+        if not summary:
+            return ""
+        return self.wrap_board_text(f"{self.news_signal(subject)}  {summary}")
+
+    def news_item(self, subject: str) -> dict[str, Any] | None:
+        return next(
+            (check for check in self.news_checks if str(check.get("subject", "")).casefold() == subject.casefold()),
+            None,
+        )
+
+    def news_summary(self, subject: str, *, width: int = 84) -> str:
+        item = self.news_item(subject)
+        if not item:
+            return ""
+        summary = str(item.get("summary") or "").strip()
+        lines = textwrap.wrap(summary, width=width)
+        if len(lines) > 2:
+            lines = lines[:2]
+            lines[-1] = lines[-1].rstrip(" .") + "…"
+        return "\n".join(lines)
+
+    def news_summary_label(self, subject: str) -> str:
+        item = self.news_item(subject) or {}
+        return "↳ LOCAL" if item.get("summary_author") == "local" else "↳ AGENT"
 
     def render_news_check(self, index: int) -> None:
         if not 0 <= index < len(self.news_checks):
@@ -305,16 +490,37 @@ class DraftDeck(App[None]):
         if event.select.id == "news-select" and event.value is not Select.BLANK:
             self.render_news_check(int(str(event.value)))
 
+    def action_toggle_summary(self) -> None:
+        table = self.query_one("#candidate-table", DataTable)
+        if not table.has_focus or not table.row_count:
+            return
+        cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+        row_key = str(cell_key.row_key.value)
+        subject = self._summary_subject_by_row.get(row_key)
+        if not subject:
+            return
+        news_key = self.news_key(subject)
+        if news_key in self.expanded_summaries:
+            self.expanded_summaries.remove(news_key)
+        else:
+            self.expanded_summaries.add(news_key)
+        self.render_assessment()
+        try:
+            table.move_cursor(row=table.get_row_index(row_key), animate=False)
+        except Exception:
+            pass
+
     @work(exclusive=True, group="advice-watch", exit_on_error=False)
     async def watch_advice(self) -> None:
         path = advice_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        async for changes in awatch(path.parent):
+        outlook_path = outlooks_path()
+        outlook_path.parent.mkdir(parents=True, exist_ok=True)
+        async for changes in awatch(path.parent, outlook_path.parent):
             changed_paths = {Path(changed).resolve() for _, changed in changes}
             if path.resolve() in changed_paths:
-                self.render_assessment()
                 self.load_advice(announce=True)
-            if news_checks_path().resolve() in changed_paths:
+            if outlook_path.resolve() in changed_paths:
                 self.load_news_checks()
 
     @work(thread=True, exclusive=True, group="live-refresh", exit_on_error=False)

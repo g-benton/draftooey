@@ -20,6 +20,29 @@ from .store import DATA_DIR, now, read_json, snapshot_path
 POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
 
 
+def _starter_progress(snapshot: dict[str, Any], roster: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Return filled/target starter slots without treating a need as progress."""
+    counts = Counter(player.get("position") for player in roster)
+    targets = Counter(snapshot["league"].get("roster_positions") or [])
+    progress: dict[str, dict[str, int]] = {}
+    for position in POSITIONS:
+        target = int(targets[position])
+        if target:
+            progress[position] = {"filled": min(int(counts[position]), target), "target": target}
+
+    flex_target = int(targets["FLEX"])
+    if flex_target:
+        fixed_flex_players = sum(
+            min(int(counts[position]), int(targets[position])) for position in ("RB", "WR", "TE")
+        )
+        flex_eligible = sum(int(counts[position]) for position in ("RB", "WR", "TE"))
+        progress["FLEX"] = {
+            "filled": min(max(0, flex_eligible - fixed_flex_players), flex_target),
+            "target": flex_target,
+        }
+    return progress
+
+
 def _flock_lookup() -> dict[str, dict[str, Any]]:
     path = DATA_DIR / "flock" / "overall_rankings.json"
     if not path.exists():
@@ -97,6 +120,27 @@ def _user_turns(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
 def _upcoming_turns(snapshot: dict[str, Any], count: int = 4) -> list[dict[str, Any]]:
     current = int(snapshot["league"].get("metadata", {}).get("current_pick_no") or 1)
     return [turn for turn in _user_turns(snapshot) if turn["slots"][-1]["pick"] >= current][:count]
+
+
+def turn_for_pick(pick: int, snapshot: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Return the snake turn that contains ``pick``, if it is one of ours."""
+    snapshot = snapshot or read_json(snapshot_path())
+    for turn in _user_turns(snapshot):
+        if pick in {int(slot["pick"]) for slot in turn["slots"]}:
+            return turn
+    return None
+
+
+def default_decision_pick(snapshot: dict[str, Any] | None = None) -> int:
+    """First open pick on our next snake turn, else the league's current pick."""
+    snapshot = snapshot or read_json(snapshot_path())
+    upcoming = _upcoming_turns(snapshot, count=1)
+    if upcoming:
+        for slot in upcoming[0]["slots"]:
+            if not slot.get("player_id"):
+                return int(slot["pick"])
+        return int(upcoming[0]["slots"][0]["pick"])
+    return int(snapshot["league"].get("metadata", {}).get("current_pick_no") or 1)
 
 
 def _candidate_score(player: dict[str, Any], gaps: dict[str, int], current_pick: int) -> tuple[float, dict[str, float]]:
@@ -221,6 +265,7 @@ def build_assessment(*, position: str | None = None, limit: int = 5) -> dict[str
         "upcoming_turns": upcoming_turns,
         "pair_plans": pair_plans,
         "needs": gaps,
+        "starter_progress": _starter_progress(snapshot, roster),
         "roster_counts": dict(counts),
         "roster": [
             {

@@ -70,5 +70,13 @@ def advice_path() -> Path:
     return DATA_DIR / "session" / "advice.json"
 
 
-def news_checks_path() -> Path:
-    return DATA_DIR / "session" / "news-checks.json"
+def outlooks_path() -> Path:
+    return DATA_DIR / "tinyfish" / "outlooks.json"
+
+
+def council_root() -> Path:
+    return DATA_DIR / "session" / "council"
+
+
+def council_dir(pick: int) -> Path:
+    return council_root() / str(int(pick))

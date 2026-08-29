@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 import typer
 from rich.console import Console
@@ -9,10 +10,10 @@ from rich.table import Table
 from .board import available_players, enrich_with_rankings, needs, roster_players, user_roster
 from .assessment import build_assessment
 from .config import load_config
-from .contracts import AdviceMessage, DraftProposal, NewsCheck, NewsFlag, NewsReview, NewsSource
+from .contracts import AdviceMessage, DraftProposal, NewsCheck, NewsFlag, NewsReview, NewsSource, SearchResult
 from .rankings import fetch_fantasypros, fetch_fantasypros_html, import_csv
 from .sleeper import refresh
-from .store import advice_path, news_checks_path, now, ranking_paths, read_json, request_log_path, snapshot_path, write_json
+from .store import advice_path, now, outlooks_path, players_path, ranking_paths, read_json, request_log_path, snapshot_path, write_json
 
 
 app = typer.Typer(help="Live Sleeper draft assistant.", no_args_is_help=True)
@@ -71,7 +72,13 @@ def available(position: str | None = typer.Option(None, "--position", "-p"), lim
     """Show undrafted players, ordered by cached ECR then ADP."""
     data = snapshot()
     players = enrich_with_rankings(available_players(data, position=position))
-    players.sort(key=lambda item: (item.get("ecr") is None, item.get("ecr") or item.get("adp") or 99999, item["name"]))
+    players.sort(
+        key=lambda item: (
+            item.get("ecr") is None,
+            item.get("ecr") or item.get("adp") or 99999,
+            item.get("name") or "",
+        )
+    )
     table = Table(title=f"Available players{f' — {position.upper()}' if position else ''}")
     table.add_column("Player")
     table.add_column("Pos")
@@ -188,26 +195,110 @@ def _parts(value: str, count: int, label: str) -> list[str]:
     return parts
 
 
-@app.command("news-publish")
-def news_publish(
+def _search_parts(value: str) -> list[str]:
+    parts = [part.strip() for part in value.split("|", maxsplit=4)]
+    if len(parts) != 5 or not all(parts[:2]):
+        raise typer.BadParameter("--search-result must contain TITLE|URL|PUBLISHED_AT|PUBLISHER|SNIPPET")
+    return parts
+
+
+OUTLOOK_PROVIDER = "tinyfish"
+OUTLOOK_PURPOSE = "Assess current fantasy-football draft outlook"
+OUTLOOK_RECENCY_MINUTES = 7 * 24 * 60
+OUTLOOK_TTL_HOURS = 6
+
+
+def _resolve_player(subject: str, player_id: str | None) -> tuple[str, str | None]:
+    catalog = read_json(players_path()).get("players", {})
+    if player_id:
+        player = catalog.get(str(player_id)) or {}
+        return str(player_id), player.get("team")
+    matches = [
+        (str(candidate_id), player.get("team"))
+        for candidate_id, player in catalog.items()
+        if str(player.get("full_name") or "").casefold() == subject.strip().casefold()
+    ]
+    if len(matches) != 1:
+        raise typer.BadParameter("Supply --player-id; subject did not resolve uniquely in Sleeper")
+    return matches[0]
+
+
+def _outlook_fingerprint(query: str) -> str:
+    value = "|".join((OUTLOOK_PROVIDER, query.casefold().strip(), OUTLOOK_PURPOSE, str(OUTLOOK_RECENCY_MINUTES), "v1"))
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _empty_outlook_cache() -> dict:
+    return {
+        "schema_version": 1,
+        "provider": OUTLOOK_PROVIDER,
+        "query_policy": {
+            "template": 'fantasy outlook "{player}"',
+            "purpose": OUTLOOK_PURPOSE,
+            "recency_minutes": OUTLOOK_RECENCY_MINUTES,
+            "ttl_hours": OUTLOOK_TTL_HOURS,
+        },
+        "updated_at": None,
+        "players": {},
+    }
+
+
+@app.command("outlook-status")
+def outlook_status(
+    subject: str = typer.Argument(...),
+    player_id: str | None = typer.Option(None, "--player-id"),
+    query: str = typer.Option("", help="Override the standard fantasy-outlook query."),
+    full: bool = typer.Option(False, "--full", help="Include raw cached search evidence on a hit."),
+) -> None:
+    """Report whether one player's lazy TinyFish outlook is a fresh cache hit."""
+    resolved_id, _ = _resolve_player(subject, player_id)
+    resolved_query = query.strip() or f'fantasy outlook "{subject.strip()}"'
+    expected = _outlook_fingerprint(resolved_query)
+    path = outlooks_path()
+    cache = read_json(path) if path.exists() else _empty_outlook_cache()
+    entry = cache.get("players", {}).get(resolved_id)
+    status = "miss"
+    if entry:
+        try:
+            fresh = datetime.fromisoformat(entry["expires_at"].replace("Z", "+00:00")) > datetime.now(UTC)
+        except (KeyError, TypeError, ValueError):
+            fresh = False
+        status = "hit" if fresh and entry.get("query_fingerprint") == expected else "stale"
+    cached = None
+    if status == "hit":
+        cached = entry if full else {
+            key: entry.get(key)
+            for key in ("subject", "team", "checked_at", "expires_at", "verdict", "confidence", "summary", "flags")
+        }
+    console.print_json(json.dumps({"status": status, "player_id": resolved_id, "query": resolved_query, "entry": cached}))
+
+
+@app.command("news-publish", hidden=True)
+@app.command("outlook-publish")
+def outlook_publish(
     subject: str = typer.Argument(..., help="Player or team shown in the dropdown."),
+    player_id: str | None = typer.Option(None, "--player-id", help="Canonical Sleeper player ID."),
     verdict: str = typer.Option(..., help="positive, neutral, negative, mixed, or uncertain."),
     confidence: str = typer.Option(..., help="low, medium, or high."),
     summary: str = typer.Option(..., help="Brief factual result and fantasy implication."),
+    summary_author: str = typer.Option("fast-agent", help="Author provenance shown on the board."),
     query: str = typer.Option("", help="Search query used."),
+    search_result: list[str] = typer.Option([], help="Repeat TITLE|URL|PUBLISHED_AT|PUBLISHER|SNIPPET."),
     flag: list[str] = typer.Option([], help="Repeat SEVERITY|TYPE|CLAIM."),
     source: list[str] = typer.Option([], help="Repeat TITLE|URL|PUBLISHED_AT."),
     review: str = typer.Option("pass", help="pass, pass_with_caveats, or fail."),
     reviewer_role: str = typer.Option("fast-sanity", help="fast-sanity or local-sanity."),
     concern: list[str] = typer.Option([], help="Repeat for reviewer caveats."),
 ) -> None:
-    """Cache one manually requested seven-day news check for the TUI."""
+    """Upsert one lazily requested TinyFish outlook for the TUI."""
     verdict = verdict.lower()
     confidence = confidence.lower()
     review = review.lower()
     reviewer_role = reviewer_role.lower()
     if not subject.strip() or not summary.strip():
         raise typer.BadParameter("Subject and summary must not be blank")
+    if len(summary.strip()) > 240:
+        raise typer.BadParameter("Summary must be at most 240 characters")
     if verdict not in {"positive", "neutral", "negative", "mixed", "uncertain"}:
         raise typer.BadParameter("Invalid --verdict")
     if confidence not in {"low", "medium", "high"}:
@@ -216,6 +307,8 @@ def news_publish(
         raise typer.BadParameter("Invalid --review")
     if reviewer_role not in {"fast-sanity", "local-sanity"}:
         raise typer.BadParameter("Invalid --reviewer-role")
+    resolved_id, team = _resolve_player(subject, player_id)
+    resolved_query = query.strip() or f'fantasy outlook "{subject.strip()}"'
 
     flags = []
     for value in flag:
@@ -235,23 +328,36 @@ def news_publish(
         except ValueError as exc:
             raise typer.BadParameter("Source date must be ISO-8601") from exc
         sources.append(NewsSource(title, url, published_at))
+    search_results = []
+    for value in search_result:
+        title, url, published_at, publisher, snippet = _search_parts(value)
+        if not url.startswith(("https://", "http://")):
+            raise typer.BadParameter("Search-result URL must be HTTP(S)")
+        search_results.append(SearchResult(title, url, published_at, publisher, snippet))
+    checked_at = datetime.now(UTC)
     check = NewsCheck(
+        player_id=resolved_id,
         subject=subject.strip(),
-        query=query.strip() or subject.strip(),
-        checked_at=now(),
+        team=team,
+        query=resolved_query,
+        query_fingerprint=_outlook_fingerprint(resolved_query),
+        checked_at=checked_at.isoformat(timespec="seconds"),
+        expires_at=(checked_at + timedelta(hours=OUTLOOK_TTL_HOURS)).isoformat(timespec="seconds"),
         verdict=verdict,  # type: ignore[arg-type]
         confidence=confidence,  # type: ignore[arg-type]
         summary=summary.strip(),
+        summary_author=summary_author.strip() or "fast-agent",
+        search_results=tuple(search_results),
         flags=tuple(flags),
         sources=tuple(sources),
         reviewer=NewsReview(outcome=review, concerns=tuple(concern), role=reviewer_role),  # type: ignore[arg-type]
     )
-    path = news_checks_path()
-    cached = read_json(path) if path.exists() else {"schema_version": 1, "checks": []}
-    checks = [item for item in cached.get("checks", []) if item.get("subject", "").casefold() != subject.casefold()]
-    checks.insert(0, check.to_dict())
-    write_json(path, {"schema_version": 1, "updated_at": now(), "checks": checks[:25]})
-    console.print(f"[green]News check cached[/green] for {subject} at {path}")
+    path = outlooks_path()
+    cached = read_json(path) if path.exists() else _empty_outlook_cache()
+    cached["players"][resolved_id] = check.to_dict()
+    cached["updated_at"] = now()
+    write_json(path, cached)
+    console.print(f"[green]Outlook cached[/green] for {subject} [{resolved_id}] at {path}")
 
 
 @app.command("tui")

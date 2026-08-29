@@ -78,6 +78,9 @@ The TUI watches the session file with `watchfiles`:
 - an advice message with proposals replaces it with an authored proposal board;
 - each pair renders as P1 evidence, P2 evidence, and a WHY row;
 - proposal names are joined back to available player evidence at render time;
+- individual and proposal tables join cached news checks by case-insensitive
+  player name, show a compact verdict/confidence signal, and render the worker's
+  summary as an `↳ AGENT` subrow;
 - a publish event reloads both the transmission and the cached assessment;
 - Sleeper is not refreshed merely because advice changed.
 
@@ -88,37 +91,54 @@ to the conversation.
 ## Recent-news signal
 
 `NewsCheck` in `fantasy/contracts.py` is an on-request research artifact. The
-search/review agent writes it through `fantasy news-publish`; the TUI only reads
-the cache and never initiates network activity. Checks are wrapped in
-`data/session/news-checks.json`:
+search/review agent writes it through `fantasy outlook-publish`; the TUI only
+reads the cache and never initiates network activity. Evidence and synthesis
+live under their provider at `data/tinyfish/outlooks.json`:
 
 ```json
 {
   "schema_version": 1,
-  "updated_at": "...",
-  "checks": [
-    {
+  "provider": "tinyfish",
+  "query_policy": {
+    "template": "fantasy outlook \"{player}\"",
+    "purpose": "Assess current fantasy-football draft outlook",
+    "recency_minutes": 10080,
+    "ttl_hours": 6
+  },
+  "updated_at": null,
+  "players": {
+    "9221": {
       "schema_version": 1,
-      "subject": "Tucker Kraft",
-      "query": "Tucker Kraft Packers injury role",
+      "player_id": "9221",
+      "subject": "Jahmyr Gibbs",
+      "team": "DET",
+      "query": "fantasy outlook \"Jahmyr Gibbs\"",
+      "query_fingerprint": "sha256",
       "checked_at": "...",
+      "expires_at": "...",
       "window_days": 7,
+      "search_results": [],
       "verdict": "positive",
       "confidence": "medium",
-      "summary": "Recent usage reports modestly improve the role outlook.",
-      "flags": [{"severity": "watch", "type": "role", "claim": "First-team usage increased."}],
-      "sources": [{"title": "Camp report", "url": "https://example.com/report", "published_at": "2026-08-28", "supports": ""}],
-      "reviewer": {"role": "fast-sanity", "outcome": "pass_with_caveats", "concerns": ["Camp usage can change."]}
+      "summary": "One or two sentences from the fast worker.",
+      "summary_author": "fast-agent",
+      "flags": [],
+      "sources": [],
+      "reviewer": {"role": "fast-sanity", "outcome": "pass", "concerns": []}
     }
-  ]
+  }
 }
 ```
 
 Allowed verdicts are `positive`, `neutral`, `negative`, `mixed`, and
 `uncertain`; they describe near-term fantasy impact, not generic media tone.
-Confidence is `low`, `medium`, or `high`. Checks are upserted case-insensitively
-by subject, ordered newest first, and capped at 25. Sources must be direct URLs
-from the seven-day evidence window. Reviewer caveats remain visible in the TUI.
+Confidence is `low`, `medium`, or `high`. Entries are keyed by canonical Sleeper
+ID. A reusable hit requires both a matching query-policy fingerprint and an
+unexpired six-hour TTL. Missing or stale entries alone authorize TinyFish and
+agent work. Most players should never receive an entry. Sources must be direct
+URLs from the seven-day evidence window; reviewer caveats remain visible.
+`outlook-status` returns a compact hit by default so persisted search snippets
+do not consume model context repeatedly; `--full` opts into the raw evidence.
 
 ## Breaking changes
 

@@ -59,6 +59,16 @@ The board has two roles:
 - When Codex publishes pair proposals, the BOARD tab becomes the proposal
   board. Each pair is three rows: P1 with stats, P2 with stats, then WHY.
 
+Both board forms include a compact NEWS signal for cached checks: `POS`, `NEU`,
+`NEG`, `MIX`, or `UNC`, followed by `H`, `M`, or `L` confidence. For example,
+`NEU·M` means neutral with medium confidence. Press `N` for the full summary,
+sources, reviewer result, and caveats in the NEWS CHECKS dropdown.
+
+Each checked player also gets an `↳ AGENT` subrow containing the fast worker's
+one- or two-sentence summary. For a shortlist, launch one fast worker per player
+concurrently and publish each completed result as it arrives. The primary agent
+may reconcile ordering/confidence, but should not rewrite sound worker summaries.
+
 Every proposed player is resolved against Sleeper, FantasyPros, and Flock. The
 visible columns include FantasyPros ECR/ADP, Flock rank, tier, and bye. Lean
 shares across proposals must total 100%; they mean relative preference among
@@ -90,17 +100,17 @@ Sleeper refresh, `Q` quit.
 
 The global `$fantasy-news-check` skill handles decision-time news research. Use
 it when the user asks about a player, injury, role, transaction, or recent buzz.
-It queries Google News RSS with `when:7d`, verifies stories against a strict
-rolling seven-day window, and uses ordinary web search for corroboration. It
-then sends only the evidence packet to a fast `gpt-5.6-luna` subagent for an
-independent sanity check. Call the first stage Google News, not the full Google
-web index.
+It checks the lazy cache first, then launches one fast `gpt-5.6-luna` worker per
+cache miss in parallel. Each worker uses TinyFish news search for the preceding
+seven days with query `fantasy outlook "PLAYER"`, fetches strong results for
+verification, and writes the 1–2 sentence summary displayed on the board.
 
 Search is always manual and conversation-paced. The TUI never runs searches.
 After review, cache the result for the NEWS CHECKS dropdown with:
 
 ```sh
-uv run fantasy news-publish 'Tucker Kraft' \
+uv run fantasy outlook-status 'Tucker Kraft' --player-id SLEEPER_ID
+uv run fantasy outlook-publish 'Tucker Kraft' --player-id SLEEPER_ID \
   --verdict positive --confidence medium \
   --summary 'Recent usage reports modestly improve the role outlook.' \
   --flag 'watch|role|First-team usage increased.' \
@@ -110,8 +120,12 @@ uv run fantasy news-publish 'Tucker Kraft' \
   --concern 'Camp usage can change.'
 ```
 
-This upserts the subject in `data/session/news-checks.json`, newest first, and
-keeps 25 checks. A running TUI reloads the dropdown immediately.
+Only a `miss` or `stale` status authorizes search. Publishing upserts the
+canonical Sleeper ID in `data/tinyfish/outlooks.json`. Entries remain fresh for
+six hours; a running TUI reloads them immediately. Do not prefetch the player
+pool—research only players being actively discussed or proposed. Normal status
+output omits raw snippets to save context; use `outlook-status ... --full` only
+when the stored evidence itself is needed.
 
 ## Data sources
 
@@ -121,7 +135,7 @@ keeps 25 checks. A running TUI reloads the dropdown immediately.
 - `data/fantasypros/api/`: retained ten-row API samples; do not prefer these
 - `data/flock/`: supplied overall/RB/WR editorial rankings
 - `data/session/advice.json`: latest assistant-to-TUI transmission
-- `data/session/news-checks.json`: manually requested, reviewed seven-day news signals
+- `data/tinyfish/outlooks.json`: lazy TinyFish evidence and fast-agent outlooks keyed by Sleeper ID
 
 Canonical player identity is the Sleeper player ID. Never overwrite it with a
 FantasyPros ID; provider IDs belong in source-specific fields.

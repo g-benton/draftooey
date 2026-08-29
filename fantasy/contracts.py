@@ -128,6 +128,43 @@ class DraftProposal:
     reason: str = ""
 
 
+CouncilConfidence = Literal["low", "medium", "high"]
+CouncilTurnKind = Literal["single", "pair", "complement"]
+
+
+@dataclass(frozen=True, slots=True)
+class CouncilConstruction:
+    """One ranked construction from a council take or the merged summary."""
+
+    players: tuple[str, ...]
+    lean: int
+    why: str = ""
+    support: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CouncilAvoid:
+    player: str
+    why: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CouncilTake:
+    """One model's independent writeback. Never written to advice.json."""
+
+    model: str
+    based_on_pick: int
+    turn: tuple[int, ...]
+    constructions: tuple[CouncilConstruction, ...]
+    avoid: tuple[CouncilAvoid, ...] = ()
+    confidence: CouncilConfidence = "medium"
+    notes: str = ""
+    schema_version: int = SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass(frozen=True, slots=True)
 class AdviceMessage:
     """Assistant-to-TUI transmission, invalidated when the draft advances."""
@@ -160,6 +197,15 @@ class NewsSource:
 
 
 @dataclass(frozen=True, slots=True)
+class SearchResult:
+    title: str
+    url: str
+    published_at: str | None = None
+    publisher: str = ""
+    snippet: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class NewsReview:
     outcome: Literal["pass", "pass_with_caveats", "fail"]
     concerns: tuple[str, ...] = ()
@@ -168,14 +214,23 @@ class NewsReview:
 
 @dataclass(frozen=True, slots=True)
 class NewsCheck:
-    """A manually requested seven-day news check displayed by the TUI."""
+    """One cacheable, lazily requested TinyFish fantasy outlook."""
 
+    player_id: str
     subject: str
     query: str
+    query_fingerprint: str
     checked_at: str
+    expires_at: str
     verdict: NewsVerdict
     confidence: NewsConfidence
     summary: str
+    team: str | None = None
+    provider: str = "tinyfish"
+    purpose: str = "Assess current fantasy-football draft outlook"
+    recency_minutes: int = 10080
+    summary_author: str = "fast-agent"
+    search_results: tuple[SearchResult, ...] = ()
     flags: tuple[NewsFlag, ...] = ()
     sources: tuple[NewsSource, ...] = ()
     reviewer: NewsReview = NewsReview("pass")
