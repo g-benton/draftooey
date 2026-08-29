@@ -1,0 +1,107 @@
+Screen {
+    background: $background;
+    color: $text;
+}
+
+Footer {
+    background: $panel;
+}
+
+#status {
+    height: 3;
+    padding: 1 2;
+    background: $panel;
+    color: $text-primary;
+    border-bottom: solid $primary;
+    text-style: bold;
+    text-overflow: ellipsis;
+}
+
+#transmission {
+    height: auto;
+    min-height: 4;
+    max-height: 7;
+    padding: 1 2;
+    background: $surface;
+    color: $text;
+    border-bottom: solid $accent;
+    overflow-y: auto;
+}
+
+#workspace {
+    height: 1fr;
+}
+
+TabPane {
+    padding: 1;
+}
+
+.section-title {
+    height: 3;
+    padding: 1;
+    color: $text-primary;
+    text-style: bold;
+}
+
+#needs-summary {
+    height: 3;
+    padding: 1;
+    color: $text-success;
+    text-style: bold;
+    overflow-x: auto;
+}
+
+#pair-plans {
+    height: auto;
+    min-height: 3;
+    max-height: 6;
+    margin-bottom: 1;
+    padding: 1 2;
+    background: $panel;
+    color: $text-accent;
+    border-left: thick $accent;
+    overflow-y: auto;
+}
+
+#candidate-table {
+    height: 1fr;
+}
+
+#player-detail {
+    height: 6;
+    padding: 1 2;
+    margin-top: 1;
+    background: $surface;
+    color: $text-muted;
+    border-top: solid $primary;
+    overflow-x: auto;
+}
+
+#turn-table {
+    height: 2fr;
+}
+
+#roster-table {
+    height: 1fr;
+}
+
+#comms-log {
+    height: 1fr;
+    padding: 1 2;
+    background: $surface;
+    border: round $accent;
+}
+
+#news-select {
+    width: 1fr;
+    margin-bottom: 1;
+}
+
+#news-detail {
+    height: 1fr;
+    padding: 1 2;
+    background: $surface;
+    color: $text;
+    border: round $accent;
+    overflow-y: auto;
+}
