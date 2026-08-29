@@ -90,6 +90,11 @@ class DraftDeck(App[None]):
         self.load_advice(announce=True)
         self.load_news_checks()
         self.watch_advice()
+        # ``watchfiles`` is the fast path, but atomic replacements can be missed
+        # by a long-running terminal process on some macOS filesystems. Polling
+        # mtimes is local-only and gives the board a reliable fallback without
+        # introducing timed Sleeper or news requests.
+        self.set_interval(1.0, self.poll_external_updates)
         if self.live_refresh:
             self.set_interval(30.0, self.action_refresh_live)
         self.query_one("#candidate-table", DataTable).focus()
@@ -522,6 +527,11 @@ class DraftDeck(App[None]):
                 self.load_advice(announce=True)
             if outlook_path.resolve() in changed_paths:
                 self.load_news_checks()
+
+    def poll_external_updates(self) -> None:
+        """Reload local transmissions if the filesystem watcher misses an event."""
+        self.load_advice()
+        self.load_news_checks()
 
     @work(thread=True, exclusive=True, group="live-refresh", exit_on_error=False)
     def refresh_live(self) -> None:
